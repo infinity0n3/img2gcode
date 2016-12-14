@@ -68,6 +68,7 @@ class Drawing(object):
         data = { 'type' : 'arc', 'center' : center, 'radius' : radius, 'start' : start, 'end': end }
         self.primitives.append(data)
         # TODO: extendBounds
+        # self.extendBounds(points)
     
     def __rbasis(self, c, t, npts, x, h):
         """
@@ -162,7 +163,17 @@ class Drawing(object):
         
         data = { 'type' : 'spline', 'control_points' : control_points, 'knots' : knots, 'degree' : degree, 'points' : points}
         self.primitives.append(data)
+        self.extendBounds(points)
+    
+    def addEllipse(self, center, major_axis, ratio, start, end):
+        data = { 'type' : 'ellipse', 'center' : center, 'major_axis' : major_axis, 'ratio' : ratio, 'start' : start, 'end' : end}
+        self.primitives.append(data)
         # TODO: extendBounds
+        points = [
+            (center[0] + major_axis[0], center[1] + major_axis[0]),
+            (center[0] - major_axis[1], center[1] - major_axis[1]),
+        ]
+        self.extendBounds(points)
     
     def transform(self, sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0):
         self.max_x *= sx
@@ -181,13 +192,19 @@ class Drawing(object):
                 p = e['center']
                 e['center'] = ( (ox + p[0])*sx, (oy + p[1])*sy)
                 e['radius'] *= (sx+sy) / 2.0
+            elif t == 'ellipse':
+                p = e['center']
+                e['center'] = ( (ox + p[0])*sx, (oy + p[1])*sy)
+                m = e['major_axis']
+                e['major_axis'] = ( m[0] * sx, m[1] * sy, 0.0)
+                # TODO scale other parameters
         
     def scale(self, sx = 1.0, sy = 1.0):
         self.transform(sx, sy)
         
 def preprocess_dxf_image(filename):
     dxf = dxfgrabber.readfile(filename)
-    print(dxf.header['$SPLINESEGS'])
+    #~ print(dxf.header['$SPLINESEGS'])
 
     output = Drawing()
 
@@ -207,22 +224,24 @@ def preprocess_dxf_image(filename):
             
         elif t == 'CIRCLE':
             output.addCircle(e.center, e.radius)
+            print e.center
+            print e.radius
+            print
+            
+        elif t == 'ELLIPSE':
+            output.addEllipse(e.center, e.major_axis, e.ratio, np.rad2deg(e.start_param), np.rad2deg(e.end_param) )
+            print e.center
+            print e.major_axis
+            print e.ratio
+            print np.rad2deg(e.start_param)
+            print np.rad2deg(e.end_param)
+            print
             
         elif t == 'ARC':
             output.addArc(e.center, e.radius, e.start_angle, e.end_angle)
             
         elif t == 'SPLINE':
-            
             output.addSpline(e.control_points, e.knots, e.degree)
-            
-            #~ print e.degree
-            #~ print e.start_tangent
-            #~ print e.end_tangent
-            #~ print e.control_points
-            #~ print e.fit_points
-            #~ print e.knots
-            #~ print e.weights
-            #~ print e.normal_vector
     
     return output
 
@@ -236,7 +255,7 @@ class EngraverOutput(object):
             'modulo' : self.get_y_list_modulo,
         }
     
-    def draw_with_hlines(self, data):
+    def draw_rows(self, data):
         """
         Draw horizontal lines.
         """
@@ -326,6 +345,9 @@ class EngraverOutput(object):
             elif t == 'arc':
                 c = e['center']
                 self.draw_arc( c[0], c[1], e['radius'], e['start'], e['end'])
+            elif t == 'ellipse':
+                c = e['center']
+                self.draw_ellipse(c[0], c[1], e['ratio'], e['major_axis'], e['start'], e['end'])
             #~ elif t == 'spline':
                 #~ self.draw_spline(e['control_points'], e['knots'], e['degree'])
             else:
@@ -383,11 +405,121 @@ class EngraverOutput(object):
     def draw_spline(self, control_points, knots, degree, color = 0):
         raise NotImplementedError('"draw_spline" function must be implemented')
     
-    def draw_circle(self, x1, y1, r, color = 0):
+    def draw_circle(self, x0, y0, r, color = 0):
         raise NotImplementedError('"draw_circle" function must be implemented')
+    
+    def __ellipse_point(self, center, r1, r2, rotM, t):
+        x1 = r1 * np.cos( np.radians(t) )
+        y1 = r2 * np.sin( np.radians(t) )
+        tmp = np.array([x1,y1])
+        p1 = center + (tmp * rotM)
+        return p1.A1[0], p1.A1[1]
+    
+    def draw_ellipse(self, x0, y0, ratio, axis, start, end, color = 0, step = 10.0):
+        #~ cv2.circle(self.dbg_img, (int(x0), int(y0)), 2, color)
+        #~ self.draw_line( int(x0), int(y0), int(x0+axis[0]), int(y0+axis[1]), 230 )
         
-    def draw_arc(self, x1, y1, r, start, end, color = 0):
-        raise NotImplementedError('"draw_arc" function must be implemented')
+        # Get length of axis vector
+        r1 = np.linalg.norm(axis)
+        # Get second radius
+        r2 = r1 * ratio
+
+        #~ cv2.circle(self.dbg_img, (int(x0), int(y0)), int(r1), 200)
+        #~ cv2.circle(self.dbg_img, (int(x0), int(y0)), int(r2), 200)
+        
+        # Get axis angle
+        if axis[0] == 0:
+            a = np.radians(90.0) 
+        elif axis[1] == 0:
+            a = np.radians(0.0) 
+        else:
+            a = np.arctan(axis[1] / axis[0])
+
+        # Prepare rotation matrix
+        center = np.array([x0,y0])
+        c1 = np.cos(a)
+        c2 = np.sin(a)
+        rotM = np.matrix([
+            [c1,c2],
+            [-c2,c1]
+        ])
+        rotMCCW = np.matrix([
+            [c1,-c2],
+            [c2,c1]
+        ])
+        
+        eye = np.matrix([ [1.0, 0.0], [0.0, 1.0] ])
+        
+        fix = 0
+        if start > end:
+            start += 180.0
+            if start > 360.0:
+                start -= 360.0
+            end += 180.0
+            
+        
+            
+        #~ if end > 360.0:
+            #~ end -= 360.0
+            
+        print "start,end", start, end
+        
+        #~ x3,y3 = self.__ellipse_point(center, r1, r2, rotM, start )
+        #~ x4,y4 = self.__ellipse_point(center, r1, r2, rotM, end)
+        #~ self.draw_line(x0,y0, x3,y3, 200)
+        #~ self.draw_line(x0,y0, x4,y4, 200)
+        #~ cv2.circle(self.dbg_img, (int(x3), int(y3)), 2, 50)
+        
+        have_prev = False
+        
+        tl = np.arange(start, end, step)
+        
+        for t in tl:
+            x2,y2 = self.__ellipse_point(center, r1, r2, rotM, t)
+
+            if have_prev:
+                self.draw_line(x1,y1, x2,y2)
+            
+            x1 = x2
+            y1 = y2
+            have_prev = True
+
+        x2,y2 = self.__ellipse_point(center, r1, r2, rotM, end)
+        self.draw_line(x1,y1, x2,y2)
+        
+    def draw_arc(self, x0, y0, r, start, end, color = 0, step = 10.0):
+        """
+        Draw an arc.
+        """
+        
+        angle = end - start
+        if angle < 0:
+            angle += 360
+        
+        steps = int(abs(angle / step))
+        
+        #~ x1 = x0 + np.cos( np.deg2rad(start) )*r
+        #~ y1 = y0 + np.sin( np.deg2rad(start) )*r
+        have_prev = False
+        
+        for a in xrange(steps):
+            angle = np.deg2rad(start + a*step)
+            x2 = x0 + np.cos(angle)*r
+            y2 = y0 + np.sin(angle)*r
+            
+            if have_prev:
+                self.draw_line(x1,y1, x2,y2, color)
+
+            x1 = x2
+            y1 = y2
+            have_prev = True
+            
+        if (start + (steps-1)*step) != end:
+            angle = np.deg2rad(end)
+            x2 = x0 + np.cos(angle)*r
+            y2 = y0 + np.sin(angle)*r
+            
+            self.draw_line(x1,y1, x2,y2, color)
     
     def draw_hline(self, x1, x2, y, color = 0):
         """
@@ -398,7 +530,7 @@ class EngraverOutput(object):
         :param y:     Start and end Y
         :param color: Line color
         """
-        raise NotImplementedError('"draw_hline" function must be implemented')
+        self.draw_line(x1, y, x2, y, color)
         
     def start(self):
         """
@@ -449,38 +581,7 @@ class DebugOutput(EngraverOutput):
     
     def draw_circle(self, x1, y1, r, color = 0):
         cv2.circle(self.dbg_img, (int(x1), int(y1)), int(r), color)
-    
-    def draw_arc(self, x0, y0, r, start, end, color = 0, step = 10.0):
-        """
-        Draw an arc.
-        """
         
-        angle = end - start
-        if angle < 0:
-            angle += 360
-        
-        steps = int(abs(angle / step))
-        
-        x1 = x0 + np.cos( np.deg2rad(start) )*r
-        y1 = y0 + np.sin( np.deg2rad(start) )*r
-        
-        for a in xrange(steps):
-            angle = np.deg2rad(start + a*step)
-            x2 = x0 + np.cos(angle)*r
-            y2 = y0 + np.sin(angle)*r
-            
-            self.draw_line(x1,y1, x2,y2, color)
-
-            x1 = x2
-            y1 = y2
-            
-        if (start + (steps-1)*step) != end:
-            angle = np.deg2rad(end)
-            x2 = x0 + np.cos(angle)*r
-            y2 = y0 + np.sin(angle)*r
-            
-            self.draw_line(x1,y1, x2,y2, color)
-    
     def __point_on_line(self, p1, p2, t):
         dx = p2[0] - p1[0]
         dy = p2[1] - p1[1]
@@ -528,12 +629,14 @@ class DebugOutput(EngraverOutput):
 
 
 #~ drawing = preprocess_dxf_image("dxf_default.dxf")
-drawing = preprocess_dxf_image("dxf_sample_laser.dxf")
+#~ drawing = preprocess_dxf_image("dxf_sample_laser.dxf")
 #~ drawing = preprocess_dxf_image("librecad3.dxf")
+drawing = preprocess_dxf_image("librecad4.dxf")
+#~ drawing = preprocess_dxf_image("drawing.dxf")
+s = 3
+drawing.transform(s, s, -drawing.min_x+1, -drawing.min_y+1)
 
-drawing.transform(20, 20, -drawing.min_x+1, -drawing.min_y+1)
-
-dbg = DebugOutput('draw.png', 500, 500)
+dbg = DebugOutput('draw.png', 1000, 500)
 dbg.start()
 dbg.draw(drawing)
 
