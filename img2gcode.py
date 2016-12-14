@@ -339,6 +339,7 @@ class LaserEngraver(EngraverOutput):
 ;FABtotum laser engraving, coded on {0}
 G4 S1 ;1 millisecond pause to buffer the bep bep
 M450 S2 ; Activate laser module
+M793 S4 ;set laser head
 M728 ;FAB bep bep
 G90 ; absolute mode
 G4 S1 ;1 second pause to reach the printer (run fast)
