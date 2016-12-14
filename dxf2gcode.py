@@ -69,8 +69,100 @@ class Drawing(object):
         self.primitives.append(data)
         # TODO: extendBounds
     
-    def addSpline(self, control_points, knots):
-        pass
+    def __rbasis(self, c, t, npts, x, h):
+        """
+        Generates rational B-spline basis functions for an open knot vector.
+        :note: Source code converted from LibreCad (rs_spline.cpp)
+        
+        """
+        nplusc = npts + c
+        temp = np.zeros(nplusc)
+        
+        # calculate the first order nonrational basis functions n[i]
+        for i in xrange(nplusc-1):
+            if t >= x[i] and t < x[i+1]:
+                temp[i] = 1
+
+        # calculate the higher order nonrational basis functions
+        for k in xrange(2,c+1):
+            for i in xrange(nplusc-k):
+                # if the lower order basis function is zero skip the calculation
+                if temp[i] != 0:
+                    temp[i] = ((t-x[i])*temp[i])/(x[i+k-1]-x[i])
+                    
+                # if the lower order basis function is zero skip the calculation
+                if temp[i+1] != 0:
+                    temp[i] += ((x[i+k]-t)*temp[i+1])/(x[i+k]-x[i+1])
+                    
+        # pick up last point
+        if t >= x[nplusc-1]:
+            temp[npts-1] = 1
+
+        # calculate sum for denominator of rational basis functions
+        sum = 0.0
+        for i in xrange(npts):
+            sum += temp[i]*h[i]
+
+        r = np.zeros(npts)
+        # form rational basis functions and put in r vector
+        if sum != 0:
+            for i in xrange(npts):
+                r[i] = (temp[i]*h[i])/sum
+        return r
+
+    def __rbspline(self, npts, k, p1, b, knot):
+        """
+        Generates a rational B-spline curve using a uniform open knot vector.
+        :note: Source code converted from LibreCad (rs_spline.cpp)
+        
+        :param npts: Number of control points
+        :param k: Spline degree
+        :param b: Control point list
+        :param knot: knot list
+        """
+        p = []
+        h = np.ones(npts+1)
+        nplusc = npts + k
+
+        # generate the open knot vector (we have one already)
+        x = knot
+
+        # calculate the points on the rational B-spline curve
+        t = 0.0
+        step = x[nplusc-1] / (p1-1)
+            
+        vp = np.zeros(shape=(p1,2))
+            
+        for i in xrange(p1):
+            if x[nplusc-1] - t < 5e-6:
+                t = x[nplusc-1]
+            # generate the basis function for this value of t
+            nbasis = self.__rbasis(k, t, npts, x, h)
+
+            # generate a point on the curve
+            for j in xrange(npts):
+                x0 = b[j][0] * nbasis[j]
+                y0 = b[j][1] * nbasis[j]
+                vp[i] += ( x0, y0 )
+                
+            t += step
+            
+            p.append( vp[i] )
+            
+        return p
+    
+    def addSpline(self, control_points, knots, degree):
+        
+        npts = len(control_points)
+        k = degree + 1
+        #~ p1 = (dxf.header['$SPLINESEGS'] or 8) * npts
+        p1 = (8) * npts
+        
+        points = self.__rbspline(npts, k, p1, control_points, knots)
+        
+        data = { 'type' : 'spline', 'control_points' : control_points, 'knots' : knots, 'degree' : degree, 'points' : points}
+        self.primitives.append(data)
+        # TODO: extendBounds
     
     def transform(self, sx = 1.0, sy = 1.0, ox = 0.0, oy = 0.0):
         self.max_x *= sx
@@ -80,7 +172,7 @@ class Drawing(object):
         
         for e in self.primitives:
             t = e['type']
-            if t == 'polyline':
+            if t == 'polyline' or t == 'spline':
                 points = []
                 for p in e['points']:
                     points.append( ( (ox + p[0])*sx, (oy + p[1])*sy) )
@@ -95,6 +187,7 @@ class Drawing(object):
         
 def preprocess_dxf_image(filename):
     dxf = dxfgrabber.readfile(filename)
+    print(dxf.header['$SPLINESEGS'])
 
     output = Drawing()
 
@@ -119,19 +212,17 @@ def preprocess_dxf_image(filename):
             output.addArc(e.center, e.radius, e.start_angle, e.end_angle)
             
         elif t == 'SPLINE':
-            pass
-            #~ for pt in e.control_points:
-                #~ if pt[0] > max_x:
-                    #~ max_x = pt[0]
-                    
-                #~ if pt[0] < min_x:
-                    #~ min_x = pt[0]
-                    
-                #~ if pt[1] > max_y:
-                    #~ max_y = pt[1]
-                    
-                #~ if pt[1] < min_y:
-                    #~ min_y = pt[1]
+            
+            output.addSpline(e.control_points, e.knots, e.degree)
+            
+            #~ print e.degree
+            #~ print e.start_tangent
+            #~ print e.end_tangent
+            #~ print e.control_points
+            #~ print e.fit_points
+            #~ print e.knots
+            #~ print e.weights
+            #~ print e.normal_vector
     
     return output
 
@@ -227,7 +318,7 @@ class EngraverOutput(object):
             t = e['type']
             if t == 'line':
                 pass
-            elif t == 'polyline':
+            elif t == 'polyline' or t == 'spline':
                 self.draw_polyline(e['points'])
             elif t == 'circle':
                 c = e['center']
@@ -235,6 +326,8 @@ class EngraverOutput(object):
             elif t == 'arc':
                 c = e['center']
                 self.draw_arc( c[0], c[1], e['radius'], e['start'], e['end'])
+            #~ elif t == 'spline':
+                #~ self.draw_spline(e['control_points'], e['knots'], e['degree'])
             else:
                 print 'TODO', t
     
@@ -280,14 +373,14 @@ class EngraverOutput(object):
         p0 = points[0]
         for p in points[1:]:
             p1 = ( int(p[0]), int(p[1]))
-            cv2.circle(self.dbg_img, p1, 2, 0)
+            #cv2.circle(self.dbg_img, p1, 2, 0)
             self.draw_line( p0[0], p0[1], p[0], p[1], color)
             p0 = p
     
     def draw_line(self, x1, y1, x2, y2, color = 0):
         raise NotImplementedError('"draw_line" function must be implemented')
     
-    def draw_spline(self, points, color = 0):
+    def draw_spline(self, control_points, knots, degree, color = 0):
         raise NotImplementedError('"draw_spline" function must be implemented')
     
     def draw_circle(self, x1, y1, r, color = 0):
@@ -388,8 +481,40 @@ class DebugOutput(EngraverOutput):
             
             self.draw_line(x1,y1, x2,y2, color)
     
-    def draw_spline(self, points, color = 0):
-        pass
+    def __point_on_line(self, p1, p2, t):
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        
+        x = p1[0] + float(dx*t)
+        y = p1[1] + float(dy*t)
+        
+        #~ print 'p1',p1, 'p2',p2, 'dx', dx,  'dy',dy, 't',t
+        
+        return (x, y)
+    
+    def __sub_bezier(self, points, t):
+        sub_points = []
+        
+        p1 = points[0]
+        for p2 in points[1:]:
+            pt = self.__point_on_line(p1, p2, t)
+            sub_points.append(pt)
+            p1 = p2
+        
+        if len(sub_points) > 1:
+            return self.__sub_bezier(sub_points, t)
+        else:
+            return sub_points
+    
+    def __bezier_points(self, points, t):
+        if type(t) == list or type(t) == np.ndarray:
+            pts = []
+            for t1 in t:
+                p = self.__sub_bezier(points, t1)
+                pts = pts + p
+            return pts
+        else:
+            return self.__sub_bezier(points, t)
     
     def end(self):
         print "Saving output to file '{0}'".format(self.filename)
@@ -402,13 +527,16 @@ class DebugOutput(EngraverOutput):
         cv2.destroyAllWindows()
 
 
-drawing = preprocess_dxf_image("dxf_default.dxf")
+#~ drawing = preprocess_dxf_image("dxf_default.dxf")
+drawing = preprocess_dxf_image("dxf_sample_laser.dxf")
+#~ drawing = preprocess_dxf_image("librecad3.dxf")
 
 drawing.transform(20, 20, -drawing.min_x+1, -drawing.min_y+1)
 
 dbg = DebugOutput('draw.png', 500, 500)
 dbg.start()
 dbg.draw(drawing)
-#dbg.draw_arc(220.0, 220.0, 140.0, 135, 45)
+
+
 #~ dbg.end()
 dbg.show()
